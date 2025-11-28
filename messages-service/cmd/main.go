@@ -3,19 +3,22 @@ package main
 import (
 	"backend/messages-service/internal/config"
 	"backend/messages-service/internal/kafka"
+	"backend/messages-service/internal/logger"
 	"backend/messages-service/internal/messages"
 	"backend/messages-service/internal/storage"
 	"backend/messages-service/internal/storage/postgresql"
 	messageshttp "backend/messages-service/internal/transport/http/messages"
+	"context"
 	"log/slog"
 	"net/http"
-	"os"
+	"os/signal"
+	"syscall"
 )
 
 func main() {
 	cfg := config.MustLoad()
 
-	log := slog.New(slog.NewJSONHandler(os.Stdout, nil))
+	log := logger.New(cfg.Env)
 	log.Info("starting app", slog.String("env", cfg.Env))
 
 	dbStorage, err := postgresql.New(cfg.PostgreSQL)
@@ -48,6 +51,7 @@ func main() {
 		cfg.Kafka.InputTopic,
 		cfg.Kafka.OutputTopic,
 		cfg.Kafka.DeadLetterTopic,
+		cfg.Org.FilePath,
 	)
 
 	handler := messageshttp.New(svc, log)
@@ -65,7 +69,23 @@ func main() {
 
 	log.Info("listening http", slog.String("address", cfg.HTTPServer.Address))
 
-	if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-		log.Error("http server error", slog.Any("error", err))
+	go func() {
+		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Error("http server error", slog.Any("error", err))
+		}
+	}()
+
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+
+	<-ctx.Done()
+	log.Info("shutdown signal received")
+
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), cfg.HTTPServer.Timeout)
+	defer cancel()
+	if err := server.Shutdown(shutdownCtx); err != nil {
+		log.Error("graceful shutdown failed", slog.Any("error", err))
+	} else {
+		log.Info("http server stopped")
 	}
 }

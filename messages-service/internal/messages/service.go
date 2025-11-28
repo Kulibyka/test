@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/mail"
+	"os"
 	"time"
 
 	"github.com/google/uuid"
@@ -19,6 +21,9 @@ type Repository interface {
 	IncrementAttempts(ctx context.Context, id string) error
 	MarkAsFailed(ctx context.Context, id string, reason string) error
 	SaveLLMResult(ctx context.Context, id string, classification string, modelAnswer json.RawMessage) error
+	ListProcessed(ctx context.Context) ([]Mail, error)
+	ApproveMail(ctx context.Context, id string) error
+	SaveAssistantResponse(ctx context.Context, id string, response json.RawMessage, markProcessed bool) error
 }
 
 // Producer — интерфейс для Kafka-продюсера.
@@ -40,7 +45,11 @@ type Mail struct {
 	Status         string          // new / processed / failed / error ...
 	Classification string          // класс письма (important/normal/...)
 	ModelAnswer    json.RawMessage // сырой json с ответом модели
+	AssistantResp  json.RawMessage // ответ ассистента, если он добавлен вручную
+	Processed      bool            // processed flag
+	IsApproved     bool            // оператор утвердил ответ
 	FailedReason   string          // причина фейла, если статус failed
+	UpdatedAt      time.Time       // updated_at
 }
 
 // DTO, приходящий в /process
@@ -57,6 +66,18 @@ type ValidateMessageDTO struct {
 	ID             string          `json:"id"`
 	Classification string          `json:"classification"`
 	ModelAnswer    json.RawMessage `json:"model_answer"`
+}
+
+// DTO для ручного ответа ассистента
+type AssistantResponseDTO struct {
+	ID                string          `json:"id"`
+	AssistantResponse json.RawMessage `json:"assistant_response"`
+	MarkProcessed     bool            `json:"mark_processed"`
+}
+
+// DTO для approveMessage
+type ApproveDTO struct {
+	ID string `json:"id"`
 }
 
 // Структура задачи, которая уходит в Kafka для llm-service
@@ -92,6 +113,7 @@ type Service struct {
 	inputTopic      string
 	outputTopic     string
 	deadLetterTopic string
+	hierarchy       map[string]any
 }
 
 // NewService конструирует Service.
@@ -103,7 +125,10 @@ func NewService(
 	log *slog.Logger,
 	maxAttempts int,
 	inputTopic, outputTopic, deadLetterTopic string,
+	hierarchyPath string,
 ) *Service {
+	hierarchy := loadHierarchy(hierarchyPath, log)
+
 	return &Service{
 		repo:            repo,
 		producer:        producer,
@@ -112,6 +137,7 @@ func NewService(
 		inputTopic:      inputTopic,
 		outputTopic:     outputTopic,
 		deadLetterTopic: deadLetterTopic,
+		hierarchy:       hierarchy,
 	}
 }
 
@@ -120,12 +146,19 @@ func NewService(
 // 1. Генерируем ID, если не пришёл.
 // 2. Сохраняем письмо в БД (attempts=0, status="new").
 // 3. Отправляем задачу в Kafka (inputTopic) для llm-service.
-func (s *Service) ProcessIncomingMessage(ctx context.Context, dto IncomingMessageDTO) error {
+func (s *Service) ProcessIncomingMessage(ctx context.Context, dto IncomingMessageDTO) (string, error) {
 	if dto.Input == "" {
-		return errors.New("input is empty")
+		return "", errors.New("input is empty")
 	}
 	if dto.From == "" || dto.To == "" {
-		return errors.New("from/to must be set")
+		return "", errors.New("from/to must be set")
+	}
+
+	if _, err := mail.ParseAddress(dto.From); err != nil {
+		return "", fmt.Errorf("invalid from address: %w", err)
+	}
+	if _, err := mail.ParseAddress(dto.To); err != nil {
+		return "", fmt.Errorf("invalid to address: %w", err)
 	}
 
 	id := dto.ID
@@ -138,7 +171,7 @@ func (s *Service) ProcessIncomingMessage(ctx context.Context, dto IncomingMessag
 		receivedAt = time.Now().UTC()
 	}
 
-	mail := &Mail{
+	mailEntity := &Mail{
 		ID:         id,
 		Input:      dto.Input,
 		From:       dto.From,
@@ -146,22 +179,24 @@ func (s *Service) ProcessIncomingMessage(ctx context.Context, dto IncomingMessag
 		ReceivedAt: receivedAt,
 		Attempts:   0,
 		Status:     "new",
+		Processed:  false,
+		IsApproved: false,
 	}
 
-	if err := s.repo.CreateMail(ctx, mail); err != nil {
+	if err := s.repo.CreateMail(ctx, mailEntity); err != nil {
 		s.log.Error("failed to save mail",
 			slog.Any("error", err),
 			slog.String("id", id),
 		)
-		return fmt.Errorf("save mail: %w", err)
+		return "", fmt.Errorf("save mail: %w", err)
 	}
 
 	task := LLMTaskMessage{
 		ID:         id,
-		Input:      mail.Input,
-		From:       mail.From,
-		To:         mail.To,
-		ReceivedAt: mail.ReceivedAt,
+		Input:      mailEntity.Input,
+		From:       mailEntity.From,
+		To:         mailEntity.To,
+		ReceivedAt: mailEntity.ReceivedAt,
 	}
 
 	data, err := json.Marshal(task)
@@ -170,7 +205,7 @@ func (s *Service) ProcessIncomingMessage(ctx context.Context, dto IncomingMessag
 			slog.Any("error", err),
 			slog.String("id", id),
 		)
-		return fmt.Errorf("marshal llm task: %w", err)
+		return "", fmt.Errorf("marshal llm task: %w", err)
 	}
 
 	if err := s.producer.Send(ctx, s.inputTopic, id, data); err != nil {
@@ -179,7 +214,7 @@ func (s *Service) ProcessIncomingMessage(ctx context.Context, dto IncomingMessag
 			slog.String("id", id),
 			slog.String("topic", s.inputTopic),
 		)
-		return fmt.Errorf("send to kafka: %w", err)
+		return "", fmt.Errorf("send to kafka: %w", err)
 	}
 
 	s.log.Info("incoming message queued for llm",
@@ -187,7 +222,7 @@ func (s *Service) ProcessIncomingMessage(ctx context.Context, dto IncomingMessag
 		slog.String("topic", s.inputTopic),
 	)
 
-	return nil
+	return id, nil
 }
 
 // ValidateProcessedMessage — бизнес-логика для /validate_processed_message.
@@ -262,7 +297,10 @@ func (s *Service) validateLLMOutput(dto ValidateMessageDTO) error {
 		return errors.New("empty model_answer")
 	}
 
-	// сюда можно добавить: распарсить ModelAnswer в конкретный struct и проверить поля
+	var parsed any
+	if err := json.Unmarshal(dto.ModelAnswer, &parsed); err != nil {
+		return fmt.Errorf("invalid model_answer json: %w", err)
+	}
 
 	return nil
 }
@@ -273,7 +311,7 @@ func (s *Service) validateLLMOutput(dto ValidateMessageDTO) error {
 // 2. Если attempts+1 >= maxAttempts → шлём в DLQ и помечаем как failed.
 // 3. Иначе → attempts++, переотправляем задачу в inputTopic.
 func (s *Service) handleInvalidLLMOutput(ctx context.Context, dto ValidateMessageDTO, validationErr error) error {
-	mail, err := s.repo.GetMail(ctx, dto.ID)
+	mailEntity, err := s.repo.GetMail(ctx, dto.ID)
 	if err != nil {
 		s.log.Error("failed to get mail for invalid llm output",
 			slog.Any("error", err),
@@ -282,7 +320,7 @@ func (s *Service) handleInvalidLLMOutput(ctx context.Context, dto ValidateMessag
 		return fmt.Errorf("get mail: %w", err)
 	}
 
-	currentAttempts := mail.Attempts
+	currentAttempts := mailEntity.Attempts
 
 	if currentAttempts+1 >= s.maxAttempts {
 		// Достигли лимита — отправляем в DLQ и помечаем как failed.
@@ -341,11 +379,11 @@ func (s *Service) handleInvalidLLMOutput(ctx context.Context, dto ValidateMessag
 	}
 
 	task := LLMTaskMessage{
-		ID:         mail.ID,
-		Input:      mail.Input,
-		From:       mail.From,
-		To:         mail.To,
-		ReceivedAt: mail.ReceivedAt,
+		ID:         mailEntity.ID,
+		Input:      mailEntity.Input,
+		From:       mailEntity.From,
+		To:         mailEntity.To,
+		ReceivedAt: mailEntity.ReceivedAt,
 	}
 
 	data, err := json.Marshal(task)
@@ -373,4 +411,67 @@ func (s *Service) handleInvalidLLMOutput(ctx context.Context, dto ValidateMessag
 	)
 
 	return nil
+}
+
+// GetProcessedMessages возвращает письма, по которым есть готовые результаты.
+func (s *Service) GetProcessedMessages(ctx context.Context) ([]Mail, error) {
+	mails, err := s.repo.ListProcessed(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("list processed: %w", err)
+	}
+	return mails, nil
+}
+
+// ApproveMessage проставляет флаг подтверждения для письма.
+func (s *Service) ApproveMessage(ctx context.Context, dto ApproveDTO) error {
+	if dto.ID == "" {
+		return errors.New("id is empty")
+	}
+
+	if err := s.repo.ApproveMail(ctx, dto.ID); err != nil {
+		return fmt.Errorf("approve mail: %w", err)
+	}
+	return nil
+}
+
+// AddAssistantResponse сохраняет ответ ассистента и, опционально, помечает письмо как обработанное.
+func (s *Service) AddAssistantResponse(ctx context.Context, dto AssistantResponseDTO) error {
+	if dto.ID == "" {
+		return errors.New("id is empty")
+	}
+	if len(dto.AssistantResponse) == 0 || string(dto.AssistantResponse) == "null" {
+		return errors.New("assistant_response is empty")
+	}
+
+	var parsed any
+	if err := json.Unmarshal(dto.AssistantResponse, &parsed); err != nil {
+		return fmt.Errorf("invalid assistant_response json: %w", err)
+	}
+
+	if err := s.repo.SaveAssistantResponse(ctx, dto.ID, dto.AssistantResponse, dto.MarkProcessed); err != nil {
+		return fmt.Errorf("save assistant response: %w", err)
+	}
+	return nil
+}
+
+func loadHierarchy(path string, log *slog.Logger) map[string]any {
+	if path == "" {
+		return nil
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		log.Warn("failed to read hierarchy file", slog.Any("error", err), slog.String("path", path))
+		return nil
+	}
+
+	var hierarchy map[string]any
+	if err := json.Unmarshal(data, &hierarchy); err != nil {
+		log.Warn("failed to parse hierarchy file", slog.Any("error", err), slog.String("path", path))
+		return nil
+	}
+
+	log.Info("hierarchy loaded", slog.Int("nodes", len(hierarchy)))
+
+	return hierarchy
 }
