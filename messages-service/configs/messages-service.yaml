@@ -1,0 +1,26 @@
+server:
+  name: messages-service
+  log_level: info
+
+kafka:
+  brokers:
+    - "kafka:9092"
+  group_id: "email-processing-group"
+  input_topic: "incoming-emails"
+  output_topic: "processed-emails"
+  consume_timeout_ms: 5000
+
+
+
+database:
+  host: "postgres"
+  port: 5432
+  user: "postgres"
+  password: "postgres"
+  dbname: "emails"
+  sslmode: "disable"
+  max_connections: 10
+  max_idle_connections: 5
+
+org:
+  file_path: "./configs/hierarchy.json"
