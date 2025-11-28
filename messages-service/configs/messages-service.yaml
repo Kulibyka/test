@@ -1,26 +1,30 @@
-server:
-  name: messages-service
-  log_level: info
+env: local
+
+http_server:
+  address: "0.0.0.0:8080"
+  timeout: 5s
+  idle_timeout: 60s
 
 kafka:
   brokers:
     - "kafka:9092"
-  group_id: "email-processing-group"
-  input_topic: "incoming-emails"
-  output_topic: "processed-emails"
-  consume_timeout_ms: 5000
+  input_topic: "messages_to_process"
+  output_topic: "processed_messages"
+  dead_letter_topic: "messages_failed"
+  producer:
+    acks: "all"
+    timeout: 3s
 
+retries:
+  max_llm_attempts: 5
 
-
-database:
+postgresql:
   host: "postgres"
   port: 5432
   user: "postgres"
   password: "postgres"
   dbname: "emails"
   sslmode: "disable"
-  max_connections: 10
-  max_idle_connections: 5
 
 org:
   file_path: "./configs/hierarchy.json"
