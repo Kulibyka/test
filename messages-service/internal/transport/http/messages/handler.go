@@ -26,6 +26,7 @@ func (h *Handler) Register(mux *http.ServeMux) {
 	mux.HandleFunc("/processed", h.handleGetProcessed)
 	mux.HandleFunc("/approve", h.handleApprove)
 	mux.HandleFunc("/add-assistant-response", h.handleAddAssistantResponse)
+	mux.HandleFunc("/healthz", h.handleHealth)
 }
 
 func (h *Handler) handleProcess(w http.ResponseWriter, r *http.Request) {
@@ -142,6 +143,15 @@ func (h *Handler) handleAddAssistantResponse(w http.ResponseWriter, r *http.Requ
 	}
 
 	writeJSON(w, http.StatusOK, map[string]string{"status": "saved", "id": dto.ID})
+}
+
+func (h *Handler) handleHealth(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
 func writeJSON(w http.ResponseWriter, status int, payload any) {

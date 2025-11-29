@@ -3,7 +3,7 @@
 This repository hosts two Go services and supporting infrastructure used to process incoming mails with an LLM.
 
 - **messages-service** — HTTP API for ingesting mails, persisting them to Postgres and publishing tasks to Kafka.
-- **llm-service** — HTTP worker that wraps the LLM call and returns JSON responses.
+- **llm-service** — HTTP proxy around OpenRouter: forwards the mail body to a hosted LLM and returns the extracted JSON answer. Requires `OPENROUTER_API_KEY`.
 - **docker-compose** — Local runtime for Postgres, Kafka/ZooKeeper and both services.
 
 ## Running locally with Docker Compose
@@ -29,4 +29,13 @@ This repository hosts two Go services and supporting infrastructure used to proc
    - Kafka broker: `localhost:9092`
    - Postgres: `localhost:5432` (database `emails`, user/password `postgres`)
 
-Configuration defaults match the values in `messages-service/configs/messages-service.yaml`. Override the config path by setting `CONFIG_PATH` if needed.
+Configuration defaults match the values in `messages-service/configs/messages-service.yaml`. Override the config path by setting `CONFIG_PATH` if needed. `llm-service` listens on `PORT` (default `8080`) and needs `OPENROUTER_API_KEY` in the environment (export it before running `docker compose up`).
+
+### Useful endpoints
+
+- `GET /healthz` — health probes for both services.
+- `POST /process` — submit incoming mail to `messages-service` (JSON body: `input`, `from`, `to`, optional `id`). The service persists the message and enqueues it to Kafka.
+- `POST /validate_processed_message` — accept LLM results for a message.
+- `GET /processed` — list processed messages.
+- `POST /approve` and `POST /add-assistant-response` — operator actions.
+- `POST /process` on `llm-service` — forwards the raw request body to the configured OpenRouter model (default `openai/gpt-4o`), extracts JSON from the response, validates it, and returns it to the caller.
