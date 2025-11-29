@@ -21,6 +21,18 @@ func main() {
 	log := logger.New(cfg.Env)
 	log.Info("starting app", slog.String("env", cfg.Env))
 
+	if err := kafka.EnsureTopics(
+		context.Background(),
+		cfg.Kafka.Brokers,
+		log,
+		cfg.Kafka.InputTopic,
+		cfg.Kafka.OutputTopic,
+		cfg.Kafka.DeadLetterTopic,
+	); err != nil {
+		log.Error("failed to ensure kafka topics", slog.Any("error", err))
+		panic(err)
+	}
+
 	dbStorage, err := postgresql.New(cfg.PostgreSQL)
 	if err != nil {
 		panic(err)
