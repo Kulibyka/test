@@ -13,8 +13,6 @@ import (
 	"github.com/google/uuid"
 )
 
-// Repository описывает, что мы ожидаем от слоя хранения (Postgres и т.п.).
-// Конкретная реализация будет в internal/storage (Repo).
 type Repository interface {
 	CreateMail(ctx context.Context, m *Mail) error
 	GetMail(ctx context.Context, id string) (*Mail, error)
@@ -26,15 +24,10 @@ type Repository interface {
 	SaveAssistantResponse(ctx context.Context, id string, response json.RawMessage, markProcessed bool) error
 }
 
-// Producer — интерфейс для Kafka-продюсера.
-// Реализация будет в internal/kafka.
 type Producer interface {
-	// Send отправляет сообщение в указанный топик.
 	Send(ctx context.Context, topic string, key string, value []byte) error
 }
 
-// Mail — доменная сущность письма.
-// Хранится в БД.
 type Mail struct {
 	ID             string          // UUID
 	Input          string          // текст письма
@@ -52,7 +45,6 @@ type Mail struct {
 	UpdatedAt      time.Time       // updated_at
 }
 
-// DTO, приходящий в /process
 type IncomingMessageDTO struct {
 	ID         string    `json:"id,omitempty"`
 	Input      string    `json:"input"`
@@ -61,26 +53,22 @@ type IncomingMessageDTO struct {
 	ReceivedAt time.Time `json:"received_at,omitempty"`
 }
 
-// DTO, приходящий в /validate_processed_message от llm-service
 type ValidateMessageDTO struct {
 	ID             string          `json:"id"`
 	Classification string          `json:"classification"`
 	ModelAnswer    json.RawMessage `json:"model_answer"`
 }
 
-// DTO для ручного ответа ассистента
 type AssistantResponseDTO struct {
 	ID                string          `json:"id"`
 	AssistantResponse json.RawMessage `json:"assistant_response"`
 	MarkProcessed     bool            `json:"mark_processed"`
 }
 
-// DTO для approveMessage
 type ApproveDTO struct {
 	ID string `json:"id"`
 }
 
-// Структура задачи, которая уходит в Kafka для llm-service
 type LLMTaskMessage struct {
 	ID         string    `json:"id"`
 	Input      string    `json:"input"`
@@ -89,14 +77,12 @@ type LLMTaskMessage struct {
 	ReceivedAt time.Time `json:"received_at"`
 }
 
-// Структура успешного результата, который уходит в output_topic
 type ProcessedMessage struct {
 	ID             string          `json:"id"`
 	Classification string          `json:"classification"`
 	ModelAnswer    json.RawMessage `json:"model_answer"`
 }
 
-// Структура, которая уходит в dead_letter_topic
 type FailedMessage struct {
 	ID        string          `json:"id"`
 	Reason    string          `json:"reason"`
@@ -104,7 +90,6 @@ type FailedMessage struct {
 	Payload   json.RawMessage `json:"payload,omitempty"`
 }
 
-// Service инкапсулирует бизнес-логику messages-service.
 type Service struct {
 	repo            Repository
 	producer        Producer
@@ -116,9 +101,6 @@ type Service struct {
 	hierarchy       map[string]any
 }
 
-// NewService конструирует Service.
-// maxAttempts — лимит попыток обработки LLM.
-// inputTopic, outputTopic, deadLetterTopic — названия Kafka-топиков.
 func NewService(
 	repo Repository,
 	producer Producer,
@@ -141,11 +123,6 @@ func NewService(
 	}
 }
 
-// ProcessIncomingMessage — бизнес-логика для эндпоинта /process.
-//
-// 1. Генерируем ID, если не пришёл.
-// 2. Сохраняем письмо в БД (attempts=0, status="new").
-// 3. Отправляем задачу в Kafka (inputTopic) для llm-service.
 func (s *Service) ProcessIncomingMessage(ctx context.Context, dto IncomingMessageDTO) (string, error) {
 	if dto.Input == "" {
 		return "", errors.New("input is empty")
@@ -225,17 +202,11 @@ func (s *Service) ProcessIncomingMessage(ctx context.Context, dto IncomingMessag
 	return id, nil
 }
 
-// ValidateProcessedMessage — бизнес-логика для /validate_processed_message.
-//
-// 1. Валидация структуры ответа от LLM.
-// 2. Если не валидно — увеличиваем attempts, решаем: ретрай или DLQ.
-// 3. Если валидно — сохраняем результат в БД и отправляем в output_topic.
 func (s *Service) ValidateProcessedMessage(ctx context.Context, dto ValidateMessageDTO) error {
 	if dto.ID == "" {
 		return errors.New("id is empty")
 	}
 
-	// Базовая валидация полей, которые мы ожидаем от LLM
 	if err := s.validateLLMOutput(dto); err != nil {
 		s.log.Warn("llm output validation failed",
 			slog.String("id", dto.ID),
@@ -244,7 +215,6 @@ func (s *Service) ValidateProcessedMessage(ctx context.Context, dto ValidateMess
 		return s.handleInvalidLLMOutput(ctx, dto, err)
 	}
 
-	// Если всё ок — сохраняем результат в БД
 	if err := s.repo.SaveLLMResult(ctx, dto.ID, dto.Classification, dto.ModelAnswer); err != nil {
 		s.log.Error("failed to save llm result",
 			slog.Any("error", err),
@@ -253,7 +223,6 @@ func (s *Service) ValidateProcessedMessage(ctx context.Context, dto ValidateMess
 		return fmt.Errorf("save llm result: %w", err)
 	}
 
-	// Отправляем в output_topic
 	msg := ProcessedMessage{
 		ID:             dto.ID,
 		Classification: dto.Classification,
@@ -287,8 +256,6 @@ func (s *Service) ValidateProcessedMessage(ctx context.Context, dto ValidateMess
 	return nil
 }
 
-// validateLLMOutput — базовая валидация JSON от LLM.
-// Здесь позже можно прикрутить jsonschema/строгую модель.
 func (s *Service) validateLLMOutput(dto ValidateMessageDTO) error {
 	if dto.Classification == "" {
 		return errors.New("empty classification")
@@ -305,11 +272,6 @@ func (s *Service) validateLLMOutput(dto ValidateMessageDTO) error {
 	return nil
 }
 
-// handleInvalidLLMOutput — логика при невалидном ответе от LLM.
-//
-// 1. Получаем письмо из БД, чтобы знать attempts и исходные данные.
-// 2. Если attempts+1 >= maxAttempts → шлём в DLQ и помечаем как failed.
-// 3. Иначе → attempts++, переотправляем задачу в inputTopic.
 func (s *Service) handleInvalidLLMOutput(ctx context.Context, dto ValidateMessageDTO, validationErr error) error {
 	mailEntity, err := s.repo.GetMail(ctx, dto.ID)
 	if err != nil {
@@ -323,7 +285,6 @@ func (s *Service) handleInvalidLLMOutput(ctx context.Context, dto ValidateMessag
 	currentAttempts := mailEntity.Attempts
 
 	if currentAttempts+1 >= s.maxAttempts {
-		// Достигли лимита — отправляем в DLQ и помечаем как failed.
 		reason := fmt.Sprintf("max attempts reached (%d): %v", s.maxAttempts, validationErr)
 
 		if err := s.repo.MarkAsFailed(ctx, dto.ID, reason); err != nil {
@@ -369,7 +330,6 @@ func (s *Service) handleInvalidLLMOutput(ctx context.Context, dto ValidateMessag
 		return nil
 	}
 
-	// Ещё можем пробовать — инкремент attempts и переотправляем задачу в inputTopic
 	if err := s.repo.IncrementAttempts(ctx, dto.ID); err != nil {
 		s.log.Error("failed to increment attempts",
 			slog.Any("error", err),
@@ -413,7 +373,6 @@ func (s *Service) handleInvalidLLMOutput(ctx context.Context, dto ValidateMessag
 	return nil
 }
 
-// GetProcessedMessages возвращает письма, по которым есть готовые результаты.
 func (s *Service) GetProcessedMessages(ctx context.Context) ([]Mail, error) {
 	mails, err := s.repo.ListProcessed(ctx)
 	if err != nil {
@@ -422,7 +381,6 @@ func (s *Service) GetProcessedMessages(ctx context.Context) ([]Mail, error) {
 	return mails, nil
 }
 
-// ApproveMessage проставляет флаг подтверждения для письма.
 func (s *Service) ApproveMessage(ctx context.Context, dto ApproveDTO) error {
 	if dto.ID == "" {
 		return errors.New("id is empty")
@@ -434,7 +392,6 @@ func (s *Service) ApproveMessage(ctx context.Context, dto ApproveDTO) error {
 	return nil
 }
 
-// AddAssistantResponse сохраняет ответ ассистента и, опционально, помечает письмо как обработанное.
 func (s *Service) AddAssistantResponse(ctx context.Context, dto AssistantResponseDTO) error {
 	if dto.ID == "" {
 		return errors.New("id is empty")

@@ -9,7 +9,6 @@ import (
 	"fmt"
 )
 
-// Repo реализует интерфейс messages.Repository
 type Repo struct {
 	db *sql.DB
 }

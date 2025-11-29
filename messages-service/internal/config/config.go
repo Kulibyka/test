@@ -56,7 +56,7 @@ type OrgConfig struct {
 func MustLoad() *Config {
 	configPath := os.Getenv("CONFIG_PATH")
 	if configPath == "" {
-		configPath = "./configs/messages-service.yaml"
+		configPath = "./messages-service/configs/messages-service.yaml"
 	}
 
 	if _, err := os.Stat(configPath); os.IsNotExist(err) {
