@@ -5,8 +5,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"io/ioutil"
+	"log"
 	"net/http"
+	"os"
 	"strings"
 
 	openrouter "github.com/revrost/go-openrouter"
@@ -18,33 +19,54 @@ var (
 )
 
 func main() {
-	systemPromptBytes, err := ioutil.ReadFile("systemprompt.txt")
-	if err != nil {
-		panic(fmt.Sprintf("Ошибка чтения systemprompt.txt: %v", err))
+	apiKey := os.Getenv("OPENROUTER_API_KEY")
+	if strings.TrimSpace(apiKey) == "" {
+		log.Fatal("OPENROUTER_API_KEY is required for llm-service to start")
 	}
 
-	orgBytes, err := ioutil.ReadFile("org.json")
+	systemPromptBytes, err := os.ReadFile("systemprompt.txt")
 	if err != nil {
-		panic(fmt.Sprintf("Ошибка чтения org.json: %v", err))
+		log.Fatalf("Ошибка чтения systemprompt.txt: %v", err)
+	}
+
+	orgBytes, err := os.ReadFile("org.json")
+	if err != nil {
+		log.Fatalf("Ошибка чтения org.json: %v", err)
 	}
 
 	fullPrompt = strings.Replace(string(systemPromptBytes), "<ORGANIZATION_JSON>", string(orgBytes), 1)
 
 	client = openrouter.NewClient(
-		"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",
+		apiKey,
 		openrouter.WithXTitle("My App"),
 		openrouter.WithHTTPReferer("https://myapp.com"),
 	)
 
-	http.HandleFunc("/process", processHandler)
+	mux := http.NewServeMux()
+	mux.HandleFunc("/process", processHandler)
+	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("ok"))
+	})
 
-	fmt.Println("Сервер запущен на :8080")
-	if err := http.ListenAndServe(":8080", nil); err != nil {
-		panic(err)
+	port := os.Getenv("PORT")
+	if port == "" {
+		port = "8080"
+	}
+
+	addr := ":" + strings.TrimPrefix(port, ":")
+	log.Printf("Сервер запущен на %s", addr)
+	if err := http.ListenAndServe(addr, mux); err != nil {
+		log.Fatalf("failed to start server: %v", err)
 	}
 }
 
 func processHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
 	body, err := io.ReadAll(r.Body)
 	if err != nil || len(body) == 0 {
 		http.Error(w, "empty body", http.StatusBadRequest)
@@ -78,7 +100,7 @@ func processHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	w.Write([]byte(jsonOnly))
+	_, _ = w.Write([]byte(jsonOnly))
 }
 
 func extractJSON(text string) string {
