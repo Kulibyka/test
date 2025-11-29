@@ -14,16 +14,34 @@ import (
 )
 
 var (
-	fullPrompt string
-	client     *openrouter.Client
+	fullPrompt   string
+	client       *openrouter.Client
+	stubResponse json.RawMessage
 )
 
 func main() {
-	apiKey := os.Getenv("OPENROUTER_API_KEY")
-	if strings.TrimSpace(apiKey) == "" {
-		log.Fatal("OPENROUTER_API_KEY is required for llm-service to start")
+	apiKey := strings.TrimSpace(os.Getenv("OPENROUTER_API_KEY"))
+	rawStub := strings.TrimSpace(os.Getenv("LLM_STUB_RESPONSE"))
+
+	if rawStub == "" {
+		rawStub = `{"classification":"general","model_answer":{"summary":"Demo response","priority":"normal","next_steps":["Follow up with the sender","Schedule the requested call"]}}`
 	}
 
+	if !isValidJSON(rawStub) {
+		log.Fatalf("LLM_STUB_RESPONSE is not valid JSON")
+	}
+
+	stubResponse = json.RawMessage(rawStub)
+
+	if apiKey == "" {
+		log.Print("OPENROUTER_API_KEY not provided — running in stub mode")
+	} else {
+		client = openrouter.NewClient(
+			apiKey,
+			openrouter.WithXTitle("My App"),
+			openrouter.WithHTTPReferer("https://myapp.com"),
+		)
+	}
 	systemPromptBytes, err := os.ReadFile("systemprompt.txt")
 	if err != nil {
 		log.Fatalf("Ошибка чтения systemprompt.txt: %v", err)
@@ -35,12 +53,6 @@ func main() {
 	}
 
 	fullPrompt = strings.Replace(string(systemPromptBytes), "<ORGANIZATION_JSON>", string(orgBytes), 1)
-
-	client = openrouter.NewClient(
-		apiKey,
-		openrouter.WithXTitle("My App"),
-		openrouter.WithHTTPReferer("https://myapp.com"),
-	)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/process", processHandler)
@@ -75,6 +87,11 @@ func processHandler(w http.ResponseWriter, r *http.Request) {
 
 	userInput := string(body)
 
+	if client == nil {
+		writeStub(w)
+		return
+	}
+
 	resp, err := client.CreateChatCompletion(
 		context.Background(),
 		openrouter.ChatCompletionRequest{
@@ -87,7 +104,8 @@ func processHandler(w http.ResponseWriter, r *http.Request) {
 		},
 	)
 	if err != nil {
-		http.Error(w, fmt.Sprintf("ChatCompletion error: %v", err), http.StatusInternalServerError)
+		log.Printf("ChatCompletion error, falling back to stub: %v", err)
+		writeStub(w)
 		return
 	}
 
@@ -101,6 +119,12 @@ func processHandler(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	_, _ = w.Write([]byte(jsonOnly))
+}
+
+func writeStub(w http.ResponseWriter) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("X-LLM-Source", "stub")
+	_, _ = w.Write(stubResponse)
 }
 
 func extractJSON(text string) string {

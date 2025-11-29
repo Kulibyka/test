@@ -63,7 +63,7 @@ WHERE id = $1;
 
 	var mail messages.Mail
 	var modelAnswer json.RawMessage
-	var assistantResponse json.RawMessage
+	var assistantResponse sql.NullString
 	var classification sql.NullString
 	var failedReason sql.NullString
 	var processed sql.NullBool
@@ -98,8 +98,8 @@ WHERE id = $1;
 	if modelAnswer != nil {
 		mail.ModelAnswer = modelAnswer
 	}
-	if assistantResponse != nil {
-		mail.AssistantResp = assistantResponse
+	if assistantResponse.Valid {
+		mail.AssistantResp = json.RawMessage(assistantResponse.String)
 	}
 	if failedReason.Valid {
 		mail.FailedReason = failedReason.String
@@ -215,6 +215,7 @@ ORDER BY updated_at DESC;
 	var mails []messages.Mail
 	for rows.Next() {
 		var mail messages.Mail
+		var assistantResponse sql.NullString
 		if err := rows.Scan(
 			&mail.ID,
 			&mail.Input,
@@ -225,11 +226,14 @@ ORDER BY updated_at DESC;
 			&mail.Status,
 			&mail.Classification,
 			&mail.ModelAnswer,
-			&mail.AssistantResp,
+			&assistantResponse,
 			&mail.IsApproved,
 			&mail.UpdatedAt,
 		); err != nil {
 			return nil, err
+		}
+		if assistantResponse.Valid {
+			mail.AssistantResp = json.RawMessage(assistantResponse.String)
 		}
 		mail.Processed = true
 		mails = append(mails, mail)
