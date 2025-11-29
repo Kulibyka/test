@@ -11,7 +11,19 @@ This repository hosts two Go services and supporting infrastructure used to proc
    ```bash
    docker compose up --build
    ```
-2. Services expose the following ports on your host:
+2. Apply the database schema for `messages-service` (the migration lives in `messages-service/migrations`):
+   - If you have `psql` installed locally:
+     ```bash
+     psql postgres://postgres:postgres@localhost:5432/emails -f messages-service/migrations/001_init.up.sql
+     ```
+   - Or run the migration through the running Postgres container (no local `psql` needed):
+     ```bash
+     docker compose exec -T postgres psql -U postgres -d emails < messages-service/migrations/001_init.up.sql
+     ```
+   - Running the migration *from* the `messages-service` container is not recommended: the runtime image is
+     distroless (no shell, no `psql` client), so it is not suitable for applying SQL. Use the Postgres
+     container or a separate tooling image instead.
+3. Services expose the following ports on your host:
    - messages-service: `http://localhost:8080`
    - llm-service: `http://localhost:8081`
    - Kafka broker: `localhost:9092`
