@@ -1,0 +1,8 @@
+CREATE TABLE IF NOT EXISTS mail (
+	id		UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+	to 		VARCHAR(255) NOT NULL,
+	from 		VARCHAR(255) NOT NULL,
+	body		TEXT NOT NULL,
+	recived_at	TIMESTAMP DEFAULT NOW(),
+	model_answer	JSON NOT NULL
+);
